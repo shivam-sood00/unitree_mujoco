@@ -99,7 +99,7 @@ class RLPolicy:
 
             # target_vel = torch.zeros(12, dtype=torch.float32)
             # self.torques = self.pd_control(target_pos, self.dof_pos, kps, target_vel, self.dof_vel, kds)
-            print("Pos actions", actions * action_scale)
+            # print("Pos actions", actions * action_scale)
             self.torques =  actions* action_scale
             # import pdb; pdb.set_trace()
         return self.torques
@@ -115,14 +115,13 @@ class RLPolicy:
             return torch.zeros(12, dtype=torch.float32)
         with torch.no_grad():
             action = self.policy(obs)
-            self.prev_action = action
-        return self._compute_torques(action)
+        return action, self._compute_torques(action)
         # return self._compute_torques(self.action_zero)
 
     def get_obs(self):
         if self.low_state is None:
             return None
-        self.step_counter += 1
+        # self.step_counter += 1
         self.ang_vel = torch.tensor([self.low_state.imu_state.gyroscope[0], self.low_state.imu_state.gyroscope[1],
                                      self.low_state.imu_state.gyroscope[2]], dtype=torch.float32)
 
@@ -137,13 +136,11 @@ class RLPolicy:
 
         commands = torch.tensor([self.command[0] * lin_vel_scale, self.command[1] * lin_vel_scale,
                                  self.command[2] * ang_vel_scale], dtype=torch.float32)
-        commands = torch.tensor([3., 0., 0.], dtype=torch.float32)
+        # commands = torch.tensor([3., 0., 0.], dtype=torch.float32)
 
         # print(self.high_state.velocity)
         lin_vel = np.array(self.high_state.velocity, dtype=np.float32).T @ quat_to_rot(quat)
         self.lin_vel = torch.tensor(lin_vel, dtype=torch.float32)
-
-        # print('lin_vel:', self.lin_vel)
 
         if num_obs == 42:
             return torch.cat((self.projected_gravity,
@@ -199,27 +196,36 @@ if __name__ == "__main__":
 
     rl_policy.load_policy(policy_path)
 
-    for i in range(20):
-        cmd.motor_cmd[i].mode = 0x01  # (PMSM) mode
-        cmd.motor_cmd[i].q = 0.0
-        cmd.motor_cmd[i].kp = 0.0
-        cmd.motor_cmd[i].dq = 0.0
-        cmd.motor_cmd[i].kd = 0.0
-        cmd.motor_cmd[i].tau = 0.0
 
+    stand_first_counter = 0
+    while stand_first_counter < 10000:
+        for i in range(12):
+            cmd.motor_cmd[i].q = default_angles[i]
+            cmd.motor_cmd[i].kp = kps[i]
+            cmd.motor_cmd[i].dq = 0.0
+            cmd.motor_cmd[i].kd = kds[i]
+            cmd.motor_cmd[i].tau = 0.0
+
+        stand_first_counter += 1
+        cmd.crc = crc.Crc(cmd)
+
+        # Publish message
+        low_cmd_puber.Write(cmd)
     step_start = time.perf_counter()
 
     # Main loop
-    while True:
+    start = time.time()
+    print("Starting the Policy")
+    while time.time() - start < simulation_duration:
         start_time = time.time()
 
-        if RLPolicy.step_counter % control_decimation == 0:
+        # if RLPolicy.step_counter % control_decimation == 0:
 
-            action = rl_policy.get_action()
+        raw_action, calculated_action = rl_policy.get_action()
+        for j in range(control_decimation):
             if control_type == 'position':
                 for i, a in enumerate(mapping):
-                    # print(action[a])
-                    cmd.motor_cmd[i].q = default_angles[i] + action[a]
+                    cmd.motor_cmd[i].q = calculated_action[a] + default_angles[i]
                     cmd.motor_cmd[i].kp = kps[i]
                     cmd.motor_cmd[i].dq = 0.0
                     cmd.motor_cmd[i].kd = kds[i]
@@ -230,7 +236,9 @@ if __name__ == "__main__":
                     cmd.motor_cmd[i].kp = 0.0
                     cmd.motor_cmd[i].dq = 0.0
                     cmd.motor_cmd[i].kd = 0.
-                    cmd.motor_cmd[i].tau = action[a]
+                    cmd.motor_cmd[i].tau = calculated_action[a]
+        RLPolicy.prev_action = raw_action
+        RLPolicy.step_counter += 1
         
         cmd.crc = crc.Crc(cmd)
 
